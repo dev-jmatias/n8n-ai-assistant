@@ -31,16 +31,14 @@ services:
     networks: [backend]
 
   searxng:
-    image: searxng/searxng:latest
+    image: ghcr.io/searxng/searxng:latest
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: https://${SEARXNG_HOST}/
       SEARXNG_SECRET: ${SEARXNG_SECRET}
       SEARXNG_VALKEY_URL: valkey://valkey:6379/0
-      SEARXNG_LIMITER: "true"
-      SEARXNG_IMAGE_PROXY: "true"
     volumes:
-      - searxng_config:/etc/searxng
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
       - searxng_cache:/var/cache/searxng
     depends_on:
       valkey:
@@ -56,6 +54,78 @@ services:
       - traefik.http.routers.searxng.tls=true
       - traefik.http.routers.searxng.tls.certresolver=${TRAEFIK_CERTRESOLVER}
       - traefik.http.services.searxng.loadbalancer.server.port=8080
+
+  sandbox-certs:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:1.2.0
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        bootstrap-mtls.sh --out-dir /tls --api-san sandbox-api
+        --control-san-prefix sandbox-runner --world-readable &&
+        chown -R sandbox-api:sandbox-api /tls/api && chmod -R a+rX /tls
+    environment:
+      NUM_RUNNERS: "1"
+    volumes:
+      - sandbox_tls:/tls
+    networks: [backend]
+
+  sandbox-api:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:1.2.0
+    restart: unless-stopped
+    environment:
+      SANDBOX_API_KEYS: ${SANDBOX_API_KEYS}
+      SANDBOX_API_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_API_RUNNER_REGISTRATION_TOKEN}
+      SANDBOX_API_RUNNER_API_KEY: ${SANDBOX_API_RUNNER_API_KEY}
+      SANDBOX_API_GRPC_TLS_CERT_FILE: /tls/api/grpc-server.crt
+      SANDBOX_API_GRPC_TLS_KEY_FILE: /tls/api/grpc-server.key
+      SANDBOX_API_GRPC_TLS_CLIENT_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/api/control-grpc-api-client.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/api/control-grpc-api-client.key
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_SERVER_NAME: sandbox-runner-1
+    volumes:
+      - sandbox_tls:/tls:ro
+    depends_on:
+      sandbox-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [backend]
+    # Internal only. Never expose ports 8080/9090 through Traefik or the host.
+
+  sandbox-runner-1:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-runner-dind:1.2.0
+    restart: unless-stopped
+    privileged: true
+    environment:
+      SANDBOX_RUNNER_API_KEYS: ${SANDBOX_RUNNER_API_KEYS}
+      SANDBOX_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_RUNNER_REGISTRATION_TOKEN}
+      SANDBOX_RUNNER_API_GRPC_ADDR: sandbox-api:9090
+      SANDBOX_RUNNER_HTTP_BASE_URL: http://sandbox-runner-1:8080
+      SANDBOX_RUNNER_CONTROL_GRPC_LISTEN_ADDR: ":9091"
+      SANDBOX_RUNNER_CONTROL_GRPC_ADVERTISE_ADDR: sandbox-runner-1:9091
+      SANDBOX_RUNNER_ID: runner-1
+      SANDBOX_RUNNER_DOCKER_SANDBOX_IMAGE: ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CA_FILE: /tls/runner/ca.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CERT_FILE: /tls/runner/grpc-client.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_KEY_FILE: /tls/runner/grpc-client.key
+      SANDBOX_RUNNER_REGISTRATION_GRPC_SERVER_NAME: sandbox-api
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/runner/control-grpc-server.crt
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/runner/control-grpc-server.key
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CLIENT_CA_FILE: /tls/runner/ca.crt
+    volumes:
+      - sandbox_tls:/tls:ro
+    depends_on:
+      sandbox-api:
+        condition: service_healthy
+    networks: [backend]
+    # Internal only. This privileged Docker-in-Docker runner must never be exposed publicly.
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
@@ -78,11 +148,21 @@ services:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       TZ: ${GENERIC_TIMEZONE}
 
-      # External task runners = isolated sandbox for Code node execution.
       N8N_RUNNERS_ENABLED: "true"
       N8N_RUNNERS_MODE: external
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+
+      N8N_AI_ENABLED: "true"
+      N8N_ENABLED_MODULES: instance-ai
+      N8N_INSTANCE_AI_SEARXNG_URL: http://searxng:8080
+      N8N_INSTANCE_AI_SANDBOX_ENABLED: "true"
+      N8N_INSTANCE_AI_SANDBOX_PROVIDER: n8n-sandbox
+      N8N_INSTANCE_AI_SANDBOX_IMAGE: ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest
+      N8N_INSTANCE_AI_SANDBOX_API_URL: http://sandbox-api:8080
+      N8N_SANDBOX_SERVICE_URL: http://sandbox-api:8080
+      N8N_SANDBOX_SERVICE_API_KEY: ${N8N_SANDBOX_SERVICE_API_KEY}
+      INSTANCE_AI_BRAVE_SEARCH_API_KEY: ${INSTANCE_AI_BRAVE_SEARCH_API_KEY}
 
       N8N_COMMUNITY_PACKAGES_ENABLED: "true"
       N8N_TEMPLATES_ENABLED: "true"
@@ -100,6 +180,8 @@ services:
         condition: service_healthy
       searxng:
         condition: service_started
+      sandbox-api:
+        condition: service_healthy
     networks:
       - backend
       - traefik_proxy
@@ -113,12 +195,12 @@ services:
       - traefik.http.services.n8n.loadbalancer.server.port=5678
 
   n8n-runners:
-    image: n8nio/runners:${N8N_VERSION}
+    image: ghcr.io/n8n-io/runners:${N8N_VERSION}
     restart: unless-stopped
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
-      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 15
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: "15"
     depends_on:
       - n8n
     networks: [backend]
@@ -127,8 +209,8 @@ volumes:
   n8n_data:
   postgres_data:
   valkey_data:
-  searxng_config:
   searxng_cache:
+  sandbox_tls:
 
 networks:
   backend:
