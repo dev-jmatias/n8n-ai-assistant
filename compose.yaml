@@ -1,0 +1,141 @@
+name: n8n-ai-assistant
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: https://${SEARXNG_HOST}/
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+      SEARXNG_LIMITER: "true"
+      SEARXNG_IMAGE_PROXY: "true"
+    volumes:
+      - searxng_config:/etc/searxng
+      - searxng_cache:/var/cache/searxng
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - backend
+      - traefik_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.searxng.rule=Host(`${SEARXNG_HOST}`)
+      - traefik.http.routers.searxng.entrypoints=${TRAEFIK_HTTPS_ENTRYPOINT}
+      - traefik.http.routers.searxng.tls=true
+      - traefik.http.routers.searxng.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.searxng.loadbalancer.server.port=8080
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    restart: unless-stopped
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}/
+      WEBHOOK_URL: https://${N8N_HOST}/
+      N8N_PROXY_HOPS: 1
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${GENERIC_TIMEZONE}
+
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+
+      N8N_COMMUNITY_PACKAGES_ENABLED: "true"
+      N8N_TEMPLATES_ENABLED: "true"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "true"
+      N8N_PUBLIC_API_DISABLED: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_SECURE_COOKIE: "true"
+
+      # Available to workflows / HTTP Request / AI tooling if you choose to use them.
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SEARXNG_URL: http://searxng:8080
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    networks:
+      - backend
+      - traefik_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)
+      - traefik.http.routers.n8n.entrypoints=${TRAEFIK_HTTPS_ENTRYPOINT}
+      - traefik.http.routers.n8n.tls=true
+      - traefik.http.routers.n8n.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
+
+  n8n-runners:
+    image: n8nio/runners:${N8N_VERSION}
+    restart: unless-stopped
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 15
+    depends_on:
+      - n8n
+    networks:
+      - backend
+
+volumes:
+  n8n_data:
+  postgres_data:
+  valkey_data:
+  searxng_config:
+  searxng_cache:
+
+networks:
+  backend:
+    driver: bridge
+  traefik_proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK}
