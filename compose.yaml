@@ -15,8 +15,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks:
-      - backend
+    networks: [backend]
 
   valkey:
     image: valkey/valkey:8-alpine
@@ -29,8 +28,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks:
-      - backend
+    networks: [backend]
 
   searxng:
     image: searxng/searxng:latest
@@ -74,12 +72,13 @@ services:
       N8N_PORT: 5678
       N8N_PROTOCOL: https
       N8N_EDITOR_BASE_URL: https://${N8N_HOST}/
-      WEBHOOK_URL: https://${N8N_HOST}/
+      N8N_WEBHOOK_URL: https://${N8N_HOST}/
       N8N_PROXY_HOPS: 1
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       TZ: ${GENERIC_TIMEZONE}
 
+      # External task runners = isolated sandbox for Code node execution.
       N8N_RUNNERS_ENABLED: "true"
       N8N_RUNNERS_MODE: external
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
@@ -92,7 +91,6 @@ services:
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_SECURE_COOKIE: "true"
 
-      # Available to workflows / HTTP Request / AI tooling if you choose to use them.
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       SEARXNG_URL: http://searxng:8080
     volumes:
@@ -123,8 +121,7 @@ services:
       N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 15
     depends_on:
       - n8n
-    networks:
-      - backend
+    networks: [backend]
 
 volumes:
   n8n_data:
